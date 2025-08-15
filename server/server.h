@@ -26,3 +26,5 @@
 // C Standard Library headers or otherwise UCRT64-compatible headers
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include <process.h>

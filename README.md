@@ -3,8 +3,6 @@
 This project is incomplete and a WIP.
 
 - Currently missing
-	- Multi-threading
-	- Controlled CTRL-C exit
 	- POSIX implementation
 
 - Won't finish completely until project completion
