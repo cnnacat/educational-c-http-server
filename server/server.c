@@ -23,9 +23,11 @@ of the repository. I might have an answer there.
 
 
 #include "server.h"
-#include <winerror.h>
+#include <string.h>
+#include <threadpoolapiset.h>
+#include <windows.h>
+#include <winnt.h>
 #include <winsock2.h>
-
 
 
 // Change port number if desired (HAS TO BE CHAR*)
@@ -34,6 +36,8 @@ of the repository. I might have an answer there.
 #define BUFFER_SIZE 1024
 // Program exit signal
 atomic_bool EXIT = false;
+// Lazy way of ID'ing a socket
+atomic_int  SOCKET_ID = 0;
 
 
 
@@ -69,12 +73,25 @@ void CALLBACK worker_thread(
 	PVOID                 parameter,
 	PTP_WORK              work)
 {
-	//todo;
-	SOCKET connection_socket = (SOCKET)(UINT_PTR)parameter;
-	int int_result;
-	int int_send_result;
+	SOCKET connection_socket;
+	int    int_result;
+	int    int_send_result;
+	int    recv_timeout;
+	char   recv_buffer[BUFFER_SIZE];
+	int    recv_buffer_length;
+	char*  body;
+	char   header[4096];
+	int    header_length;
+	int    socket_id;
+	int    sent_bytes_body;
+	int    sent_bytes_header;
 
-	int recv_timeout = 500; // 500ms / 0.5s
+	connection_socket  = (SOCKET)(UINT_PTR)parameter;
+	recv_timeout       = 500; // 500ms aka 0.5s
+	recv_buffer_length = BUFFER_SIZE;
+	socket_id          = SOCKET_ID++;
+
+
 	setsockopt(
 		connection_socket,
 		SOL_SOCKET,
@@ -82,13 +99,8 @@ void CALLBACK worker_thread(
 		(const char*)&recv_timeout,
 		sizeof(recv_timeout));
 
-	char recv_buffer[BUFFER_SIZE];
-	int  recv_buffer_length = BUFFER_SIZE;
-
 	do
 	{
-		printf("THREAD\n");
-
 		int_result = recv(
 			connection_socket,
 			recv_buffer,
@@ -97,18 +109,17 @@ void CALLBACK worker_thread(
 
 		if (int_result > 0)
 		{
-			int sent_bytes_header = 0;
-			int sent_bytes_body   = 0;
+			sent_bytes_header = 0;
+			sent_bytes_body   = 0;
 
-			printf("Bytes recieved: %d\n", int_result);
+			printf("Socket %d || Bytes recieved: %d\n", socket_id, int_result);
 
-			char* body = 
+			body = 
 			"<!doctype html><meta charset=\"utf-8\">"
 			"<title>Hello Teto</title>"
 			"<div><h1>Hello Teto</h1></div>";
 
-			char header[4096];
-			int header_length = _snprintf_s(
+			header_length = _snprintf_s(
 				header, 
 				sizeof(header),
 				_TRUNCATE,
@@ -119,11 +130,13 @@ void CALLBACK worker_thread(
 				"\r\n",
 				(int)strlen(body)
 				);
+
 			if (header_length < 0)
 			{
-				printf("Truncation occured while formatting header.\n");
+				printf("Socket %d || Truncation occured while formatting header.\n", socket_id);
 				break;
 			}
+
 			while (sent_bytes_header < header_length)
 			{
 				int_send_result = send(
@@ -131,11 +144,13 @@ void CALLBACK worker_thread(
 					header        + sent_bytes_header, // Advance to the next batch of data to send
 					header_length - sent_bytes_header,   // Take in account already sent data
 					0);
+
 				if (int_send_result == SOCKET_ERROR)
 				{
-					printf("Failed to send header. Code: %d\n", WSAGetLastError());
+					printf("Socket %d || Failed to send header. Code: %d\n", socket_id, WSAGetLastError());
 					break;
 				}
+
 				sent_bytes_header += int_send_result;
 			}
 
@@ -146,21 +161,23 @@ void CALLBACK worker_thread(
 					body         + sent_bytes_body,
 					strlen(body) - sent_bytes_body,
 					0);
+
 				if (int_send_result == SOCKET_ERROR)
 				{
-					printf("Failed to send body. Code %d\n", WSAGetLastError());
+					printf("Socket %d || Failed to send body. Code %d\n", socket_id, WSAGetLastError());
 					break;
 				}
+
 				sent_bytes_body += int_send_result;
 			}
 
-			printf("Sent %d bytes\n", sent_bytes_body + sent_bytes_header);
+			printf("Socket %d || Sent %d bytes\n", socket_id, sent_bytes_body + sent_bytes_header);
 			putchar('\n');
 			break;
 		}
 		else if (int_result == 0)
 		{
-			printf("Connection closing.\n");
+			printf("Socket %d || Connection closing.\n", socket_id);
 			break;
 		}
 		else
@@ -168,10 +185,10 @@ void CALLBACK worker_thread(
 			int error = WSAGetLastError();
 			if (error == WSAETIMEDOUT)
 			{
-				printf("recv timed out\n");
+				printf("Socket %d || recv timed out.\n", socket_id);
 				break;
 			}
-			printf("recv failed: %d\n", WSAGetLastError());
+			printf("Socket %d || recv failed. Code: %d\n", socket_id, WSAGetLastError());
 			break;
 		}
 
@@ -180,7 +197,7 @@ void CALLBACK worker_thread(
 	int_result = shutdown(connection_socket, SD_SEND);
 	if (int_result == SOCKET_ERROR)
 	{
-		printf("Shutdown failed. Code: %d\n", WSAGetLastError());
+		printf("Socket %d || Shutdown failed. Code: %d\n", socket_id, WSAGetLastError());
 	}
 
 	closesocket(connection_socket);
@@ -191,50 +208,57 @@ void CALLBACK worker_thread(
 
 int main(void)
 {
-	SetConsoleCtrlHandler(ctrl_handler, TRUE);
-
 	TP_CALLBACK_ENVIRON callback_environment;
-	PTP_CLEANUP_GROUP clean_up_group = NULL;
+	PTP_CLEANUP_GROUP   clean_up_group;
+	PTP_POOL            thread_pool;
+	PTP_WORK            worker_init;
+	
+	WSADATA             wsa_data;
+	int                 int_result;
 
-	PTP_POOL thread_pool = CreateThreadpool(NULL);
+	struct addrinfo*    result;
+	struct addrinfo     hints;
+	struct addrinfo*    index;
+
+	SOCKET              listening_socket;
+	SOCKET              connection_socket;
+	BOOL                exclusive;
+	int                 accept_ready;
+
+	fd_set              socket_status;
+	TIMEVAL             timer;
+
+
+	result         = NULL;
+	index          = NULL;
+	clean_up_group = NULL;
+	clean_up_group = CreateThreadpoolCleanupGroup();
+	thread_pool    = NULL;
+	thread_pool    = CreateThreadpool(NULL);
+
 	if (thread_pool == NULL)
 	{
 		printf("Thread pool failed to create. Code: %lu\n", GetLastError());
 		exit(-1);
-	}
+	}	
 
-	InitializeThreadpoolEnvironment(&callback_environment);
-	clean_up_group = CreateThreadpoolCleanupGroup();
-	SetThreadpoolCallbackPool(&callback_environment, thread_pool);
-	SetThreadpoolCallbackCleanupGroup(
+	InitializeThreadpoolEnvironment   (&callback_environment);
+	SetThreadpoolCallbackPool         (&callback_environment, thread_pool);	
+	SetThreadpoolCallbackCleanupGroup (
 		&callback_environment,
 		clean_up_group,
-		NULL);
+		NULL);	
+	SetConsoleCtrlHandler             (ctrl_handler, TRUE);
 
-	// NOTE: After initialization of WSADATA, you must free with WSACleanup().
-	WSADATA wsa_data;
-	int     int_result;
+	// program starts here
 
-	// NOTE: result needs to be freed with freeaddrinfo() after initialization
-	struct addrinfo* result = NULL;
-	struct addrinfo  hints;
-	struct addrinfo* index;
-
-
-	SOCKET listening_socket;     // Socket that the server listens to
-	SOCKET connection_socket;    // Socket that the server accepts connections from clients
-
-	fd_set socket_status;
-
-
-	// MAKEWORD(2, 2) corresponds to version 2.2 (latest version as of August 2025)
+	// Startup version 2.2 (latest as of August 2025)
 	int_result = WSAStartup(MAKEWORD(2, 2), &wsa_data);
 	if (int_result != 0)
 	{
 		printf("WSAStartup() failure: %d\n", int_result);
 		exit(-1);
 	}
-
 
 	// SecureZeroMemory(destination, length) == memset(destination, 0, length). !!!
 	SecureZeroMemory(&hints, sizeof(hints));
@@ -279,9 +303,8 @@ int main(void)
 		}
 
 
-		BOOL exclusive = TRUE;
-
 		// Set listen socket to be exclusive to the main thread
+		exclusive = TRUE;		
 		int_result = setsockopt(
 			listening_socket,
 			SOL_SOCKET,
@@ -303,6 +326,7 @@ int main(void)
 		
 		if (int_result == 0)
 			break;
+
 		else
 		{
 			printf("Error: Bind failed. %d\n", WSAGetLastError());
@@ -333,13 +357,12 @@ int main(void)
 		exit(-1);
 	}
 
-	TIMEVAL timer = {1, 0}; // 1 sec, 0 ms
 	while (!EXIT)
 	{
 		FD_ZERO(&socket_status);
-		FD_SET(listening_socket, &socket_status);
+		FD_SET (listening_socket, &socket_status);
 
-		int accept_ready = select(
+		accept_ready = select(
 			0,
 			&socket_status, // this is the readfds parameter; Add all sockets to socket_status set if it's ready to be accepted
 			NULL,
@@ -360,10 +383,11 @@ int main(void)
 				NULL,
 				NULL);
 
-			PTP_WORK worker_init = CreateThreadpoolWork(
+			worker_init = CreateThreadpoolWork(
 				&worker_thread,
 				(PVOID)(UINT_PTR)connection_socket,
 				&callback_environment);
+
 			if (worker_init == NULL)
 			{
 				printf("Failed to initialize worker function. Code: %lu\n", GetLastError());
@@ -374,20 +398,21 @@ int main(void)
 			SubmitThreadpoolWork(worker_init);
 		}
 	}
-	closesocket(listening_socket);
 
+	closesocket(listening_socket); 
+
+	// Wait for all threads to finish and clean up threads
 	CloseThreadpoolCleanupGroupMembers(
 		clean_up_group, 
 		TRUE,
 		NULL);
-	CloseThreadpoolCleanupGroup(clean_up_group);
-	DestroyThreadpoolEnvironment(&callback_environment);
-	CloseThreadpool(thread_pool);
+	CloseThreadpoolCleanupGroup  (clean_up_group);
+	DestroyThreadpoolEnvironment (&callback_environment);
+	CloseThreadpool              (thread_pool);
 
 	// Clean up
 	FreeAddrInfo(result); 
-
-	WSACleanup();
+	WSACleanup  ();
 
 	printf("Shutdown successful.\n");
 	getchar();
