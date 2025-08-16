@@ -23,11 +23,6 @@ of the repository. I might have an answer there.
 
 
 #include "server.h"
-#include <string.h>
-#include <threadpoolapiset.h>
-#include <windows.h>
-#include <winnt.h>
-#include <winsock2.h>
 
 
 // Change port number if desired (HAS TO BE CHAR*)
@@ -172,7 +167,6 @@ void CALLBACK worker_thread(
 			}
 
 			printf("Socket %d || Sent %d bytes\n", socket_id, sent_bytes_body + sent_bytes_header);
-			putchar('\n');
 			break;
 		}
 		else if (int_result == 0)
@@ -200,6 +194,11 @@ void CALLBACK worker_thread(
 		printf("Socket %d || Shutdown failed. Code: %d\n", socket_id, WSAGetLastError());
 	}
 
+	else
+		printf("Socket %d || Successfully shutdown.\n", socket_id);
+
+
+	putchar('\n');
 	closesocket(connection_socket);
 	return;
 
