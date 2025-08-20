@@ -21,10 +21,18 @@
 // POSIX-compliant API or otherwise POSIX-compliant headers
 #elif  defined(__linux__) || defined(__APPLE__)
 	#include <sys/socket.h>
-
+	#include <pthread.h>
+	#include <signal.h>
+	#include <netdb.h>
+	#include <errno.h>
+	#include <unistd.h>
+	#include <sys/time.h>
 #endif
 
 // C Standard Library headers or otherwise UCRT64-compatible headers
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdint.h>

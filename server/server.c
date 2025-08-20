@@ -23,6 +23,12 @@ of the repository. I might have an answer there.
 
 
 #include "server.h"
+#include <asm-generic/errno.h>
+#include <netdb.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <sys/select.h>
+#include <sys/socket.h>
 
 
 // Change port number if desired (HAS TO BE CHAR*)
@@ -34,6 +40,21 @@ atomic_bool EXIT = false;
 // Lazy way of ID'ing a socket
 atomic_int  SOCKET_ID = 0;
 
+
+void hang()
+{
+	int temp;
+
+	printf("Press ENTER to quit: ");
+
+	while ((temp = getchar()) != '\n'
+		|| temp != EOF)
+	{
+		;
+	}
+
+	return;
+}
 
 
 #if _WIN32
@@ -198,7 +219,7 @@ void CALLBACK worker_thread(
 		printf("Socket %d || Successfully shutdown.\n", socket_id);
 
 
-	putchar('\n');
+	hang();
 	closesocket(connection_socket);
 	return;
 
@@ -234,10 +255,12 @@ int main(void)
 	clean_up_group = CreateThreadpoolCleanupGroup();
 	thread_pool    = NULL;
 	thread_pool    = CreateThreadpool(NULL);
+	timer          = (struct timeval){1, 0};
 
 	if (thread_pool == NULL)
 	{
 		printf("Thread pool failed to create. Code: %lu\n", GetLastError());
+		hang();
 		exit(-1);
 	}	
 
@@ -256,6 +279,7 @@ int main(void)
 	if (int_result != 0)
 	{
 		printf("WSAStartup() failure: %d\n", int_result);
+		hang();
 		exit(-1);
 	}
 
@@ -283,6 +307,7 @@ int main(void)
 	{
 		printf("GetAddrInfo() failure: %d\n", int_result);
 		WSACleanup();
+		hang();
 		exit(-1);
 	}
 
@@ -320,8 +345,8 @@ int main(void)
 		// Set up (bind) the listening socket
 		int_result = bind(
 			listening_socket,
-			result->ai_addr,
-			(int)result->ai_addrlen);
+			index->ai_addr,
+			(int)index->ai_addrlen);
 		
 		if (int_result == 0)
 			break;
@@ -339,6 +364,7 @@ int main(void)
 		FreeAddrInfo(result);
 		closesocket(listening_socket);
 		WSACleanup();
+		hang();
 		exit(-1);
 	}
 
@@ -353,6 +379,7 @@ int main(void)
 		closesocket(listening_socket);
 		FreeAddrInfo(result);
 		WSACleanup();
+		hang();
 		exit(-1);
 	}
 
@@ -414,11 +441,326 @@ int main(void)
 	WSACleanup  ();
 
 	printf("Shutdown successful.\n");
-	getchar();
+	hang();
 	return 0;
 }
 
 #elif defined(__linux__) || defined(__APPLE__)
-//todo
 
+// hard code for now, linked list later
+pthread_t thread_list[100];
+
+void ctrl_handler(int signal_number)
+{
+	if (signal_number == SIGINT)
+		EXIT = true;	
+	return;
+}
+
+void* worker_function(void* argument)
+{
+	int  connection_socket;
+	int    int_result;
+	int    int_send_result;
+	int    recv_timeout;
+	char   recv_buffer[BUFFER_SIZE];
+	int    recv_buffer_length;
+	char*  body;
+	char   header[4096];
+	int    header_length;
+	int    socket_id;
+	int    sent_bytes_body;
+	int    sent_bytes_header;
+
+	connection_socket  = (int)(intptr_t)argument;
+	recv_timeout       = 500; // 500ms aka 0.5s
+	recv_buffer_length = BUFFER_SIZE;
+	socket_id          = SOCKET_ID++;
+
+
+	setsockopt(
+		connection_socket,
+		SOL_SOCKET,
+		SO_RCVTIMEO,
+		(const char*)&recv_timeout,
+		sizeof(recv_timeout));
+
+	do
+	{
+		int_result = recv(
+			connection_socket,
+			recv_buffer,
+			recv_buffer_length,
+			0);
+
+		if (int_result > 0)
+		{
+			sent_bytes_header = 0;
+			sent_bytes_body   = 0;
+
+			printf("Socket %d || Bytes recieved: %d\n", socket_id, int_result);
+
+			body = 
+			"<!doctype html><meta charset=\"utf-8\">"
+			"<title>Hello Teto</title>"
+			"<div><h1>Hello Teto</h1></div>";
+
+			header_length = snprintf(
+				header, 
+				sizeof(header),
+				"HTTP/1.1 200 OK\r\n"
+				"Content-Type: text/html; charset=utf-8\r\n"
+				"Content-Length: %d\r\n"
+				"Connection: close\r\n"
+				"\r\n",
+				(int)strlen(body)
+				);
+
+			if (header_length < 0)
+			{
+				printf("Socket %d || Truncation occured while formatting header.\n", socket_id);
+				break;
+			}
+
+			while (sent_bytes_header < header_length)
+			{
+				int_send_result = send(
+					connection_socket,
+					header        + sent_bytes_header, // Advance to the next batch of data to send
+					header_length - sent_bytes_header,   // Take in account already sent data
+					0);
+
+				if (int_send_result < 0)
+				{
+					printf("Socket %d || Failed to send header. Code: %d\n", socket_id, errno);
+					break;
+				}
+
+				sent_bytes_header += int_send_result;
+			}
+
+			while (sent_bytes_body < strlen(body))
+			{
+				int_send_result = send(
+					connection_socket,
+					body         + sent_bytes_body,
+					strlen(body) - sent_bytes_body,
+					0);
+
+				if (int_send_result < 0)
+				{
+					printf("Socket %d || Failed to send body. Code %d\n", socket_id, errno);
+					break;
+				}
+
+				sent_bytes_body += int_send_result;
+			}
+
+			printf("Socket %d || Sent %d bytes\n", socket_id, sent_bytes_body + sent_bytes_header);
+			break;
+		}
+		else if (int_result == 0)
+		{
+			printf("Socket %d || Connection closing.\n", socket_id);
+			break;
+		}
+		else
+		{
+			int error = errno;
+			if (error == EAGAIN
+				|| error == EWOULDBLOCK)
+			{
+				printf("Socket %d || recv timed out.", socket_id);
+				break;
+			}
+			printf("Socket %d || recv failed. Code: %d\n", socket_id, errno);
+			break;
+		}
+
+	} while (int_result > 0);
+
+	int_result = shutdown(connection_socket, SHUT_WR);
+	if (int_result < 0)
+	{
+		printf("Socket %d || Shutdown failed. Code: %d\n", socket_id, errno);
+	}
+
+	else
+		printf("Socket %d || Successfully shutdown.\n", socket_id);
+
+
+	hang();
+	close(connection_socket);
+	return NULL;
+
+}
+
+
+int main(void)
+{
+	struct sigaction signal_action;
+
+	signal_action.sa_handler = ctrl_handler;
+	signal_action.sa_flags   = 0;
+	sigemptyset(&signal_action.sa_mask);
+	sigaction(
+		SIGINT,
+		&signal_action,
+		(void*)NULL
+	);
+
+	int socket_file_descriptor;
+	int int_result;
+	struct addrinfo* result;
+	struct addrinfo  hints;
+	struct addrinfo* index;
+	int listening_socket;
+	int connection_socket;
+	bool exclusive;
+	fd_set socket_status;
+	int accept_ready;
+	struct timeval timer;
+	int thread_id;
+
+
+	thread_id = 0;
+	timer = (struct timeval){1, 0};
+
+
+	memset(
+		&hints,
+		0,
+		sizeof(hints));
+
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = SOCK_STREAM;
+	hints.ai_flags = 0;
+
+	int_result = getaddrinfo(
+		"127.0.0.1",
+		PORT,
+		&hints,
+		&result);
+	if (!int_result)
+	{
+		printf("getaddrinfo failed. Reason: %s\n", gai_strerror(errno));
+		hang();
+		exit(-1);
+	}
+
+	for (index = result; index != NULL; index = result->ai_next)
+	{
+		listening_socket = socket(
+			index->ai_family,
+			index->ai_protocol,
+			index->ai_flags);
+
+		if (listening_socket < 0)
+		{
+			printf("Socket creation error. Reason: %s\n", gai_strerror(errno));
+			continue;
+		}
+
+		// this effectively is equiv to so_exclusiveuseaddr in windows
+		// due to the user_id restriction implemented in linux's so_reuseaddr
+		exclusive = true;
+		int_result = setsockopt(
+			listening_socket,
+			SOL_SOCKET,
+			SO_REUSEADDR,
+			(const char*)&exclusive, 
+			sizeof(exclusive));
+
+		if (int_result)
+		{
+			printf("Failed to set socket options for a socket. Reason: %s\n", gai_strerror(errno));
+		}
+
+		int_result = bind(
+			listening_socket,
+			index->ai_addr,
+			(size_t)index->ai_addrlen);
+
+		if (int_result == 0)
+			break;
+		else
+		{
+			printf("Failed to bind. Reason: %s\n", gai_strerror(errno));
+			close(listening_socket);
+			continue;
+		}
+	}
+
+	if (!listening_socket)
+	{
+		printf("Couldn't bind to any sockets.");
+		hang();
+		exit(-1);
+	}
+
+	int_result = listen(listening_socket, SOMAXCONN);
+	if (int_result < 0)
+	{
+		printf("Failed to listen to the binded socket. Reason: %s\n", gai_strerror(errno));
+		hang();
+		exit(-1);
+	}
+
+	while (!EXIT)
+	{
+		FD_ZERO(&socket_status);
+		FD_SET(listening_socket, &socket_status);
+
+		accept_ready = select(
+			0,
+			&socket_status,
+			NULL,
+			NULL,
+			&timer);
+
+		if (accept_ready < 0)
+		{
+			printf("Error occured with select(). Reason: %s\n", gai_strerror(errno));
+			continue;
+		}
+		else if (accept_ready == 0)
+		{
+			printf("No connections incoming.\n");
+			break;
+		}
+
+		
+		if (FD_ISSET(listening_socket, &socket_status))
+		{
+			connection_socket = accept(
+				listening_socket,
+				NULL,
+				NULL);
+			if (connection_socket < 0)
+			{
+				printf("Error occured while trying to accept a connection. Reason: %s\n", gai_strerror(errno));
+				continue;
+			}
+
+			pthread_create(
+				&thread_list[thread_id++], 
+				NULL,
+				worker_function,
+				(void*)(intptr_t)connection_socket);
+		}
+
+	}
+
+	for (int i = 0; i < 1000; i++)
+	{
+		pthread_join(thread_list[i], NULL);
+	}
+
+	freeaddrinfo(result);
+	close(listening_socket);
+	printf("Shutdown successful.\n");
+	hang();
+	return 0;
+}
 #endif
