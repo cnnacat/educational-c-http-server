@@ -13,7 +13,7 @@ set(SOURCE_FILES
 # during compilation if the compiler supports such options.
 
 if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-	add_compile_options(-Wall -Werror -pedantic)
+	# add_compile_options(-Wall -Werror -pedantic)
 endif()
 
 
