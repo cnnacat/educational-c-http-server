@@ -4,6 +4,7 @@ This project is incomplete and a WIP.
 
 - Currently missing
 	- testing
+	- thread overflow checks
 
 - Won't finish completely until project completion
 	- Documentation and explanations

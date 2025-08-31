@@ -23,16 +23,14 @@ of the repository. I might have an answer there.
 
 
 #include "server.h"
-#include <asm-generic/errno.h>
-#include <netdb.h>
-#include <pthread.h>
-#include <stdint.h>
-#include <sys/select.h>
-#include <sys/socket.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <string.h>
+
 
 
 // Change port number if desired (HAS TO BE CHAR*)
-#define PORT "888"
+#define PORT "8080"
 // For use in sending/recieving data
 #define BUFFER_SIZE 1024
 // Program exit signal
@@ -48,7 +46,7 @@ void hang()
 	printf("Press ENTER to quit: ");
 
 	while ((temp = getchar()) != '\n'
-		|| temp != EOF)
+		&& temp != EOF)
 	{
 		;
 	}
@@ -589,10 +587,8 @@ void* worker_function(void* argument)
 		printf("Socket %d || Successfully shutdown.\n", socket_id);
 
 
-	hang();
 	close(connection_socket);
 	return NULL;
-
 }
 
 
@@ -609,14 +605,13 @@ int main(void)
 		(void*)NULL
 	);
 
-	int socket_file_descriptor;
 	int int_result;
 	struct addrinfo* result;
 	struct addrinfo  hints;
 	struct addrinfo* index;
 	int listening_socket;
 	int connection_socket;
-	bool exclusive;
+	int exclusive;
 	fd_set socket_status;
 	int accept_ready;
 	struct timeval timer;
@@ -632,49 +627,49 @@ int main(void)
 		0,
 		sizeof(hints));
 
-	hints.ai_family = AF_INET;
+	hints.ai_family   = AF_INET;
 	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = SOCK_STREAM;
-	hints.ai_flags = 0;
+	hints.ai_protocol = IPPROTO_TCP;
+	hints.ai_flags    = 0;
 
 	int_result = getaddrinfo(
 		"127.0.0.1",
 		PORT,
 		&hints,
 		&result);
-	if (!int_result)
+	if (int_result < 0)
 	{
-		printf("getaddrinfo failed. Reason: %s\n", gai_strerror(errno));
+		printf("getaddrinfo failed. Reason: %s\n", gai_strerror(int_result));
 		hang();
 		exit(-1);
 	}
 
-	for (index = result; index != NULL; index = result->ai_next)
+	for (index = result; index != NULL; index = index->ai_next)
 	{
 		listening_socket = socket(
 			index->ai_family,
-			index->ai_protocol,
-			index->ai_flags);
+			index->ai_socktype,
+			index->ai_protocol);
 
 		if (listening_socket < 0)
 		{
-			printf("Socket creation error. Reason: %s\n", gai_strerror(errno));
+			printf("Socket creation error. Reason: %s || Code: %d\n", strerror(errno), errno);
 			continue;
 		}
 
 		// this effectively is equiv to so_exclusiveuseaddr in windows
 		// due to the user_id restriction implemented in linux's so_reuseaddr
-		exclusive = true;
+		exclusive = 1;
 		int_result = setsockopt(
 			listening_socket,
 			SOL_SOCKET,
 			SO_REUSEADDR,
-			(const char*)&exclusive, 
+			&exclusive, 
 			sizeof(exclusive));
 
 		if (int_result)
 		{
-			printf("Failed to set socket options for a socket. Reason: %s\n", gai_strerror(errno));
+			printf("Failed to set socket options for a socket. Reason: %s\n", strerror(errno));
 		}
 
 		int_result = bind(
@@ -686,15 +681,15 @@ int main(void)
 			break;
 		else
 		{
-			printf("Failed to bind. Reason: %s\n", gai_strerror(errno));
+			printf("Failed to bind. Reason: %s\n", strerror(errno));
 			close(listening_socket);
 			continue;
 		}
 	}
 
-	if (!listening_socket)
+	if (listening_socket < 0)
 	{
-		printf("Couldn't bind to any sockets.");
+		printf("Couldn't bind to any sockets.\n");
 		hang();
 		exit(-1);
 	}
@@ -702,7 +697,7 @@ int main(void)
 	int_result = listen(listening_socket, SOMAXCONN);
 	if (int_result < 0)
 	{
-		printf("Failed to listen to the binded socket. Reason: %s\n", gai_strerror(errno));
+		printf("Failed to listen to the binded socket. Reason: %s\n", strerror(errno));
 		hang();
 		exit(-1);
 	}
@@ -712,8 +707,11 @@ int main(void)
 		FD_ZERO(&socket_status);
 		FD_SET(listening_socket, &socket_status);
 
+		timer.tv_sec = 1;
+		timer.tv_usec = 0;
+
 		accept_ready = select(
-			0,
+			listening_socket + 1,
 			&socket_status,
 			NULL,
 			NULL,
@@ -721,14 +719,14 @@ int main(void)
 
 		if (accept_ready < 0)
 		{
-			printf("Error occured with select(). Reason: %s\n", gai_strerror(errno));
+			printf("Error occured with select(). Reason: %s\n", strerror(errno));
 			continue;
 		}
-		else if (accept_ready == 0)
+/*		else if (accept_ready == 0)
 		{
 			printf("No connections incoming.\n");
 			break;
-		}
+		}*/
 
 		
 		if (FD_ISSET(listening_socket, &socket_status))
@@ -739,7 +737,7 @@ int main(void)
 				NULL);
 			if (connection_socket < 0)
 			{
-				printf("Error occured while trying to accept a connection. Reason: %s\n", gai_strerror(errno));
+				printf("Error occured while trying to accept a connection. Reason: %s\n", strerror(errno));
 				continue;
 			}
 
@@ -752,14 +750,14 @@ int main(void)
 
 	}
 
-	for (int i = 0; i < 1000; i++)
+	for (int i = 0; i < thread_id; i++)
 	{
 		pthread_join(thread_list[i], NULL);
 	}
 
 	freeaddrinfo(result);
 	close(listening_socket);
-	printf("Shutdown successful.\n");
+	printf("Clean shutdown successful.\n");
 	hang();
 	return 0;
 }
